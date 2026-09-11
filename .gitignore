@@ -1,0 +1,6 @@
+node_modules/
+.wrangler/
+.dev.vars
+.vscode/
+.DS_Store
+Thumbs.db
