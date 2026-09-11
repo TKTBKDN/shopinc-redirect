@@ -1,16 +1,14 @@
 /**
- * Cloudflare Workers - Facebook Redirect Optimizer
+ * Cloudflare Workers - Ultra-Fast Edge Redirect & Meta Optimizer (No API)
  * 
  * Flow:
- * - Non-Facebook users -> Instant 301 redirect (no API calls)
- * - Facebook crawlers -> Serve cached meta tags from KV, fetch from API, or scrape directly from target site
+ * - Non-Facebook users -> Instant 301 redirect directly at Edge (< 5ms, 0 API overhead)
+ * - Facebook crawlers  -> Serve cached meta from KV or scrape directly from destination URL
  * 
  * Features:
- * - KV caching to minimize API calls (saves costs)
- * - Direct meta scraping for sites without API (e.g. ecommerce, print on demand)
- * - 3-second API timeout with fallback to backup JSON
- * - Cache meta data for 24 hours
- * - Edge-level redirects (ultra fast)
+ * - No external API dependencies (super fast, 100% independent)
+ * - KV caching for meta tags (24h TTL)
+ * - Edge-level redirects (sub-millisecond execution)
  */
 
 // ============= DOMAIN GROUPS =============
@@ -51,11 +49,6 @@ const DOMAIN_GROUPS = {
   'https://dailynewsus.daily24.blog': ['lyriczonenews.com', 'beatvibes.net', 'tuneflow.net', 'beatvibes.org', 'tuneflow.org'],
 };
 
-// Danh sách target domain KHÔNG dùng News API mà sẽ cào (scrape) thẻ meta trực tiếp từ web đích
-const DIRECT_SCRAPE_TARGETS = [
-  'https://trendlnk.com',
-];
-
 // Tự động tạo DOMAIN_MAP từ DOMAIN_GROUPS
 const DOMAIN_MAP = {};
 Object.entries(DOMAIN_GROUPS).forEach(([target, domains]) => {
@@ -67,17 +60,8 @@ const DEFAULT_REDIRECT = 'https://topnewsus.feji.io';
 
 // ============= CONFIGURATION =============
 const CONFIG = {
-  // Primary API endpoint (dành cho các trang tin tức)
-  API_URL: 'https://apinewspaper.vbonews.com/News/news-detailbasic',
-
-  // Backup JSON CDN (R2 hoặc CDN khác)
-  BACKUP_URL: 'https://file.lifenews247.com/tktnews/backup',
-
-  // API timeout in milliseconds
-  API_TIMEOUT: 3000,
-
   // Scrape timeout in milliseconds
-  SCRAPE_TIMEOUT: 4000,
+  SCRAPE_TIMEOUT: 3000,
 
   // Cache TTL in seconds (24 hours)
   CACHE_TTL: 86400,
@@ -98,10 +82,10 @@ export default {
       return new Response(null, { status: 204 });
     }
 
-    const userAgent = (request.headers.get('user-agent') || '').toLowerCase();
     const targetDomain = DOMAIN_MAP[url.hostname] || DEFAULT_REDIRECT;
+    const userAgent = (request.headers.get('user-agent') || '').toLowerCase();
 
-    // ===== FAST PATH: Non-Facebook users get instant redirect =====
+    // ===== FAST PATH: Người dùng thật -> Chuyển hướng 301 tức thì tại Edge (< 5ms, KHÔNG gọi bất kỳ API nào) =====
     if (!isFacebookCrawler(userAgent)) {
       return Response.redirect(
         `${targetDomain}${url.pathname}${url.search}`,
@@ -109,71 +93,14 @@ export default {
       );
     }
 
-    // ===== FACEBOOK CRAWLER PATH: Serve meta tags =====
+    // ===== FACEBOOK CRAWLER PATH: Chỉ phục vụ thẻ meta xem trước cho bot Facebook =====
+    const targetUrl = `${targetDomain}${url.pathname}${url.search}`;
+    const cacheKey = `meta:${url.hostname}:${pathname}`;
 
-    // Trường hợp 1: Domain nằm trong danh sách cào trực tiếp (như trendlnk.com không có API)
-    const isDirectScrape = DIRECT_SCRAPE_TARGETS.includes(targetDomain);
-    if (isDirectScrape) {
-      const targetUrl = `${targetDomain}${url.pathname}${url.search}`;
-      const cacheKey = `meta:scrape:${url.hostname}:${pathname}`;
-
-      // 1. Kiểm tra KV cache
-      if (env.META_CACHE) {
-        try {
-          const cached = await env.META_CACHE.get(cacheKey, 'json');
-          if (cached) {
-            return createMetaResponse(cached.name, cached.avatarLink, cached.description);
-          }
-        } catch (e) {
-          console.log('KV cache miss or error');
-        }
-      }
-
-      // 2. Cào meta trực tiếp từ trang web đích
-      const metaData = await scrapeMetaData(targetUrl);
-
-      // 3. Lưu vào KV cache
-      if (env.META_CACHE && (metaData.name || metaData.avatarLink)) {
-        try {
-          await env.META_CACHE.put(
-            cacheKey,
-            JSON.stringify(metaData),
-            { expirationTtl: CONFIG.CACHE_TTL }
-          );
-        } catch (e) {
-          console.log('Failed to cache scraped meta:', e);
-        }
-      }
-
-      return createMetaResponse(metaData.name, metaData.avatarLink, metaData.description);
-    }
-
-    // Trường hợp 2: Các trang tin tức thông thường
-    // Handle homepage
-    if (pathname === '/' || pathname === '') {
-      return createMetaResponse('Trang chủ', '');
-    }
-
-    // Extract slug and ID from path (format: /p-title-123)
-    const slug = pathname.slice(1); // Remove leading /
-    const id = extractId(slug);
-
-    if (!id) {
-      // Fallback: Thử cào trực tiếp từ URL đích thay vì báo Không tìm thấy
-      const targetUrl = `${targetDomain}${url.pathname}${url.search}`;
-      const metaData = await scrapeMetaData(targetUrl);
-      if (metaData.name || metaData.avatarLink) {
-        return createMetaResponse(metaData.name, metaData.avatarLink, metaData.description);
-      }
-      return createMetaResponse('Không tìm thấy', '');
-    }
-
-    // Try to get from KV cache first (fastest)
-    let metaData = null;
-
+    // 1. Kiểm tra KV cache trước (siêu tốc < 5ms)
     if (env.META_CACHE) {
       try {
-        const cached = await env.META_CACHE.get(`meta:${id}`, 'json');
+        const cached = await env.META_CACHE.get(cacheKey, 'json');
         if (cached) {
           return createMetaResponse(cached.name, cached.avatarLink, cached.description);
         }
@@ -182,19 +109,19 @@ export default {
       }
     }
 
-    // Not in cache, fetch from API
-    metaData = await fetchMetaData(id, userAgent);
+    // 2. Cào meta trực tiếp từ trang web đích (không phụ thuộc API bên ngoài)
+    const metaData = await scrapeMetaData(targetUrl);
 
-    // Save to KV cache for next time
-    if (env.META_CACHE && metaData.name) {
+    // 3. Lưu vào KV cache cho các lần quét sau
+    if (env.META_CACHE && (metaData.name || metaData.avatarLink)) {
       try {
         await env.META_CACHE.put(
-          `meta:${id}`,
+          cacheKey,
           JSON.stringify(metaData),
           { expirationTtl: CONFIG.CACHE_TTL }
         );
       } catch (e) {
-        console.log('Failed to cache:', e);
+        console.log('Failed to cache scraped meta:', e);
       }
     }
 
@@ -205,26 +132,12 @@ export default {
 // ============= HELPER FUNCTIONS =============
 
 /**
- * Check if user agent is Facebook crawler
+ * Kiểm tra xem User-Agent có phải là bot của Facebook hay không
  */
 function isFacebookCrawler(userAgent) {
   return userAgent.includes('facebook') ||
     userAgent.includes('facebookexternalhit') ||
     userAgent.includes('facebot');
-}
-
-/**
- * Extract ID from slug
- * Supports: /abc-xyz-03036380f8cd or /03036380f8cd
- * ID must be exactly 12 alphanumeric characters
- */
-function extractId(slug) {
-  if (!slug) return null;
-
-  const lastDash = slug.lastIndexOf('-');
-  const id = lastDash === -1 ? slug : slug.slice(lastDash + 1);
-
-  return /^[a-zA-Z0-9]{12}$/.test(id) ? id : null;
 }
 
 /**
@@ -314,82 +227,7 @@ function decodeHtmlEntities(str) {
 }
 
 /**
- * Fetch meta data from API with fallback to backup JSON
- */
-async function fetchMetaData(id, userAgent = '') {
-  console.log(`[REQUEST] ID: ${id}, UserAgent: ${userAgent}`);
-
-  // 1. Try primary API with timeout
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), CONFIG.API_TIMEOUT);
-
-    const apiUrl = `${CONFIG.API_URL}?id=${id}`;
-    console.log(`[API] Fetching: ${apiUrl}`);
-
-    const response = await fetch(apiUrl, {
-      signal: controller.signal,
-      headers: {
-        'Accept': 'application/json',
-      }
-    });
-    clearTimeout(timeoutId);
-
-    if (response.ok) {
-      const json = await response.json();
-      const data = json.data;
-
-      if (data?.name?.trim()) {
-        console.log(`[API SUCCESS] ID: ${id}, Name: ${data.name}`);
-        return {
-          name: data.name.trim(),
-          avatarLink: data.avatarLink || '',
-          description: data.summary || data.name.trim()
-        };
-      } else {
-        console.log(`[API WARNING] ID: ${id} - No valid name in response`);
-      }
-    } else {
-      console.log(`[API ERROR] ID: ${id} - HTTP ${response.status}`);
-    }
-  } catch (e) {
-    console.log(`[API FAILED] ID: ${id} - ${e.message}`);
-  }
-
-  // 2. Fallback to backup JSON from CDN
-  try {
-    const backupUrl = `${CONFIG.BACKUP_URL}/${id}.json`;
-    console.log(`[BACKUP] Fetching: ${backupUrl}`);
-
-    const backupResponse = await fetch(backupUrl);
-
-    if (backupResponse.ok) {
-      const backup = await backupResponse.json();
-
-      if (backup?.name?.trim()) {
-        console.log(`[BACKUP SUCCESS] ID: ${id}, Name: ${backup.name}`);
-        return {
-          name: backup.name.trim(),
-          avatarLink: backup.avatarLink || '',
-          description: backup.summary || backup.name.trim()
-        };
-      } else {
-        console.log(`[BACKUP WARNING] ID: ${id} - No valid name in backup`);
-      }
-    } else {
-      console.log(`[BACKUP ERROR] ID: ${id} - HTTP ${backupResponse.status}`);
-    }
-  } catch (e) {
-    console.log(`[BACKUP FAILED] ID: ${id} - ${e.message}`);
-  }
-
-  // 3. Both failed, return empty
-  console.log(`[FINAL] ID: ${id} - Both API and Backup failed, returning empty`);
-  return { name: '', avatarLink: '', description: '' };
-}
-
-/**
- * Create HTML response with Open Graph meta tags
+ * Tạo HTML phản hồi với các thẻ Open Graph meta cho bot Facebook
  */
 function createMetaResponse(name, avatarLink, description = '') {
   const safeName = escapeHtml(name);
@@ -426,7 +264,7 @@ function createMetaResponse(name, avatarLink, description = '') {
 }
 
 /**
- * Escape HTML special characters to prevent XSS
+ * Escape HTML special characters để chống lỗi hiển thị và XSS
  */
 function escapeHtml(str) {
   if (!str) return '';
