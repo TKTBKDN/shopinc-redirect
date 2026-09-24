@@ -19,7 +19,7 @@
 const DOMAIN_GROUPS = {
   // Nhóm 1
   'https://newsustk.cafex.biz': ['newspaperusa24h.com'],
-  'https://trendlnk.com': ['toptrendlnk.com', 'toptrenduslnk.com'],
+  'https://trendlnk.com': ['toptrendlnk.com', 'toptrenduslnk.com','trendlnk24h.com','hottrendlnk.com'],
 
   // Nhóm 2
   'https://lovetk.cfx.bz': ['todaynow24h.com'],
